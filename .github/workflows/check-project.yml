@@ -1,0 +1,120 @@
+on:
+  issues:
+    types: [opened, edited]
+jobs:
+  checkProjectURL:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        name: Check for StackBlitz or Bolt reproduction link
+        with:
+          script: |
+            const issue = await github.rest.issues.get({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const projectInfo = parseProjectInfo(issue.data.body ?? '');
+
+            if (!projectInfo) {
+              // if no project info is found, we can assume that the user did not provide a StackBlitz or Bolt reproduction link
+              await comment(issue.data, 'We noticed that you did not provide a StackBlitz or Bolt reproduction link. Please update the issue and add a link to a public project.');
+
+              return;
+            }
+
+            const projectExists = await checkProject(projectInfo); 
+
+            if (!projectExists) {
+              // if the response is not ok, we can assume that the project is not public
+              await comment(issue.data, 'We noticed that the project you shared is not public. Please change the visibility of the project to either secret or public.');
+
+              return;
+            }
+
+            // we can remove the label in case it was added before
+            await removeLabel();
+
+            function parseProjectInfo(comment) {
+              const reproRegex = /https:\/\/(?:stackblitz\.com|bolt\.new)\/(?:(?:~|c)\/)?(?:edit\/)?(?<slug>[a-zA-Z0-9-]+)/i;
+
+              const { slug } = comment.match(reproRegex)?.groups || {};
+
+              if (!slug) {
+                return null;
+              }
+
+              // if the slug is `github`, we test if a GitHub link is provided
+              if (slug === 'github') {
+                const githubRegex = /https:\/\/stackblitz\.com\/(?:~\/(?:github\.com|github_project)|github)\/(?<owner>[\w\-_]+)\/(?<repo>[\w\-_]+)/i;
+
+                const { owner, repo } = comment.match(githubRegex)?.groups || {};
+
+                if (owner && repo) {
+                  return { type: 'github', owner, repo };
+                }
+              }
+
+              return { type: 'stackblitz', slug };
+            }
+
+            async function checkProject(projectInfo) {
+              if (projectInfo.type === 'github') {
+                const { owner, repo } = projectInfo;
+
+                try {
+                  const response = await github.rest.repos.get({
+                    owner,
+                    repo,
+                  });
+
+                  return response.status === 200;
+                } catch {
+                  return false;
+                }
+              }
+
+              if (projectInfo.type === 'stackblitz') {
+                const { slug } = projectInfo;
+
+                const response = await fetch(`https://stackblitz.com/api/projects/${slug}`, {
+                  method: 'HEAD',
+                });
+
+                return response.ok;
+              }
+
+              return false;
+            }
+
+            async function comment(issue, body) {
+              if (issue.labels.some((label) => label.name === 'needs reproduction')) {
+                // do not comment or add the label again if we already have the label
+                return;
+              }
+
+              await Promise.allSettled([
+                github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body,
+                }),
+                github.rest.issues.addLabels({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  labels: ['needs reproduction'],
+                })
+              ]);
+            }
+
+            async function removeLabel() {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'needs reproduction',
+              });
+            }
